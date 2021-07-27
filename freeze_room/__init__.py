@@ -7,7 +7,7 @@ from synapse.util.frozenutils import unfreeze
 
 from freeze_room._constants import EventTypes, Membership
 
-FROZEN_STATE_TYPE = "io.element.room.frozen"
+FROZEN_STATE_TYPE = "org.matrix.room.frozen"
 
 
 class RoomFreeze:
