@@ -61,6 +61,16 @@ class RoomFreezeTest(aiounittest.AsyncTestCase):
                     "room_id": "!someroom:example.com",
                 },
                 RoomVersions.V7,
+            ),
+            (EventTypes.JoinRules, ""): FrozenEventV3(
+                {
+                    "sender": self.user_id,
+                    "type": EventTypes.JoinRules,
+                    "state_key": "",
+                    "content": {"join_rule": "public"},
+                    "room_id": "!someroom:example.com",
+                },
+                RoomVersions.V7,
             )
         }
 
@@ -130,6 +140,25 @@ class RoomFreezeTest(aiounittest.AsyncTestCase):
         allowed, replacement = await module.check_event_allowed(pl_event, self.state)
         self.assertTrue(allowed)
         self.assertIsNone(replacement)
+
+    async def test_join_rules_sent_when_freezing(self):
+        """Tests that the module resets the join rules to "invite" if the room gets
+        frozen.
+        """
+        module = create_module()
+        allowed, _ = await module.check_event_allowed(
+            self._build_frozen_event(sender=self.user_id, frozen=True),
+            self.state,
+        )
+        self.assertTrue(allowed)
+
+        # Test that two events have been sent (the join rules change and the PL change)
+        # and that one of them is the correct join rules change.
+        self.assertTrue(module._api.create_and_send_event_into_room.called)
+        args = module._api.create_and_send_event_into_room.call_args_list
+        self.assertEqual(len(args), 2)
+        join_rules_dict, _ = args[0]
+        self.assertEqual(join_rules_dict[0]["content"]["join_rule"], "invite")
 
     async def test_cannot_send_messages_when_frozen(self):
         """Tests that users can't send messages when the room is frozen. Also tests that

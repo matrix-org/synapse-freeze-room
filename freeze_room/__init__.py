@@ -116,6 +116,25 @@ class FreezeRoom:
         if not self._is_local_user(event.sender):
             return True, None
 
+        current_join_rules = state_events.get(
+            (EventTypes.JoinRules, ""),
+        )  # type: EventBase
+
+        # If the room is publicly joinable, revert that upon freezing the room.
+        if frozen is True and(
+            current_join_rules is None
+            or current_join_rules.content["join_rule"] == "public"
+        ):
+            await self._api.create_and_send_event_into_room(
+                {
+                    "room_id": event.room_id,
+                    "sender": event.sender,
+                    "type": EventTypes.JoinRules,
+                    "content": {"join_rule": "invite"},
+                    "state_key": "",
+                }
+            )
+
         current_power_levels = state_events.get(
             (EventTypes.PowerLevels, ""),
         )  # type: EventBase
