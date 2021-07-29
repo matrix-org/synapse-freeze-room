@@ -77,9 +77,12 @@ class RoomFreeze:
             # Invalid event: frozen is either missing or not a boolean.
             return False, None
 
-        # If the event was sent from a restricted homeserver, don't allow the state
-        # change.
-        if UserID.from_string(event.sender).domain in self._unfreeze_blacklist:
+        # If a user on the unfreeze blacklist attempts to unfreeze the room, don't allow
+        # the state change.
+        if (
+            frozen is False
+            and UserID.from_string(event.sender).domain in self._unfreeze_blacklist
+        ):
             return False, None
 
         current_frozen_state = state_events.get(
