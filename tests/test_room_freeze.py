@@ -1,6 +1,8 @@
 # From Python 3.8 onwards, aiounittest.AsyncTestCase can be replaced by
 # unittest.IsolatedAsyncioTestCase, so we'll be able to get rid of this dependency when
 # we stop supporting Python < 3.8 in Synapse.
+import copy
+
 import aiounittest
 from synapse.api.room_versions import RoomVersions
 from synapse.events import FrozenEventV3
@@ -16,7 +18,8 @@ class RoomFreezeTest(aiounittest.AsyncTestCase):
             (EventTypes.PowerLevels, ""): FrozenEventV3(
                 {
                     "sender": self.user_id,
-                    "type": FROZEN_STATE_TYPE,
+                    "type": EventTypes.PowerLevels,
+                    "state_key": "",
                     "content": {
                         "ban": 50,
                         "events": {
@@ -47,6 +50,9 @@ class RoomFreezeTest(aiounittest.AsyncTestCase):
         }
 
     async def test_send_frozen_state(self):
+        """Tests that the module allows frozen state change, and that users on the
+        unfreeze blacklist are forbidden from unfreezing it.
+        """
         module = create_module(
             config_override={"unfreeze_blacklist": ["evil.com"]},
         )
@@ -59,21 +65,31 @@ class RoomFreezeTest(aiounittest.AsyncTestCase):
         # Synapse to rebuild it because we've changed the state.
         self.assertEqual(replacement, freeze_event.get_dict())
 
-        # Test that an event sent from a forbidden server isn't allowed.
+        # Test that an unfreeze sent from a forbidden server isn't allowed.
         allowed, _ = await module.check_event_allowed(
-            self._build_frozen_event("@alice:evil.com", True),
+            self._build_frozen_event(sender="@alice:evil.com", frozen=False),
             self.state,
         )
         self.assertFalse(allowed)
 
+        # Test that a freeze sent from a forbidden server is allowed.
+        allowed, _ = await module.check_event_allowed(
+            self._build_frozen_event(sender="@alice:evil.com", frozen=True),
+            self.state,
+        )
+        self.assertTrue(allowed)
+
         # Test that an event sent with an non-boolean value isn't allowed.
         allowed, _ = await module.check_event_allowed(
-            self._build_frozen_event("@alice:evil.com", "foo"),
+            self._build_frozen_event(sender=self.user_id, frozen="foo"),
             self.state,
         )
         self.assertFalse(allowed)
 
     async def test_power_levels_sent_when_freezing(self):
+        """Tests that the module sends the right power levels update when it sees a room
+        being unfrozen.
+        """
         module = create_module()
         pl_event_dict = await self._send_frozen_event_and_get_pl_update(module, True)
 
@@ -82,6 +98,10 @@ class RoomFreezeTest(aiounittest.AsyncTestCase):
             self.assertEqual(pl, 100, user)
 
     async def test_power_levels_sent_when_unfreezing(self):
+        """Tests that the module sends the right power levels update when it sees a room
+        being unfrozen, and that the resulting power levels update is allowed when the
+        room is frozen (since we persist it before finishing to process the unfreeze).
+        """
         module = create_module()
         pl_event_dict = await self._send_frozen_event_and_get_pl_update(module, False)
 
@@ -97,9 +117,14 @@ class RoomFreezeTest(aiounittest.AsyncTestCase):
         self.assertIsNone(replacement)
 
     async def test_cannot_send_messages_when_frozen(self):
+        """Tests that users can't send messages when the room is frozen. Also tests that
+        the power levels can't be updated in a different way than how it would happen
+        with an unfreeze of the room.
+        """
         self.state[(FROZEN_STATE_TYPE, "")] = self._build_frozen_event(self.user_id, True)
         module = create_module()
 
+        # Test that a normal message event isn't allowed when the room is frozen.
         allowed, _ = await module.check_event_allowed(
             FrozenEventV3(
                 {
@@ -114,7 +139,42 @@ class RoomFreezeTest(aiounittest.AsyncTestCase):
         )
         self.assertFalse(allowed)
 
+        # Check that, when the room is frozen, sending a PL update that sets the users
+        # default back to 0 without naming a new admin isn't allowed.
+        new_pl_event = copy.deepcopy(self.state[(EventTypes.PowerLevels, "")].get_dict())
+        new_pl_event["content"]["users"] = {}
+        new_pl_event["content"]["users_default"] = 0
+        allowed, _ = await module.check_event_allowed(
+            FrozenEventV3(new_pl_event, RoomVersions.V7),
+            self.state,
+        )
+        self.assertFalse(allowed)
+
+        # Check that, when the room is frozen, sending a PL update that explictly
+        # prevents someone from unfreezing the room isn't allowed.
+        new_pl_event = copy.deepcopy(self.state[(EventTypes.PowerLevels, "")].get_dict())
+        new_pl_event["content"]["users"] = {}
+        new_pl_event["content"]["users"]["@bob:example.com"] = 50
+        allowed, _ = await module.check_event_allowed(
+            FrozenEventV3(new_pl_event, RoomVersions.V7),
+            self.state,
+        )
+        self.assertFalse(allowed)
+
+        # Check that, when the room is frozen, sending a PL update that sets the users
+        # default back to 0 while naming someone else admin isn't allowed.
+        new_pl_event = copy.deepcopy(self.state[(EventTypes.PowerLevels, "")].get_dict())
+        new_pl_event["content"]["users"] = {}
+        new_pl_event["content"]["users"]["@bob:example.com"] = 100
+        new_pl_event["content"]["users_default"] = 0
+        allowed, _ = await module.check_event_allowed(
+            FrozenEventV3(new_pl_event, RoomVersions.V7),
+            self.state,
+        )
+        self.assertFalse(allowed)
+
     async def test_can_leave_room_when_frozen(self):
+        """Tests that users can still leave a room when it's frozen."""
         self.state[(FROZEN_STATE_TYPE, "")] = self._build_frozen_event(self.user_id, True)
         module = create_module()
 
@@ -152,6 +212,7 @@ class RoomFreezeTest(aiounittest.AsyncTestCase):
         self.assertFalse(allowed)
 
     async def test_auto_freeze_when_last_admin_leaves(self):
+        """Tests that the module freezes the room when it sees its last admin leave."""
         module = create_module()
 
         leave_event = FrozenEventV3(
@@ -169,6 +230,7 @@ class RoomFreezeTest(aiounittest.AsyncTestCase):
         self.assertTrue(allowed)
         self.assertEqual(replacement, leave_event.get_dict())
 
+        # Test that the leave triggered a freeze of the room.
         self.assertTrue(module._api.create_and_send_event_into_room.called)
         args, _ = module._api.create_and_send_event_into_room.call_args
         self.assertEqual(len(args), 1)
@@ -182,6 +244,9 @@ class RoomFreezeTest(aiounittest.AsyncTestCase):
     async def _send_frozen_event_and_get_pl_update(
         self, module: RoomFreeze, frozen: bool,
     ) -> dict:
+        """Sends a frozen state change and get the dict for the power level update it
+        triggered.
+        """
         allowed, _ = await module.check_event_allowed(
             self._build_frozen_event(sender=self.user_id, frozen=frozen),
             self.state,
@@ -196,6 +261,7 @@ class RoomFreezeTest(aiounittest.AsyncTestCase):
         return args[0]
 
     def _build_frozen_event(self, sender: str, frozen: bool) -> FrozenEventV3:
+        """Build a new org.matrix.room.frozen event with the given sender and value."""
         event_dict = {
             "sender": sender,
             "type": FROZEN_STATE_TYPE,
