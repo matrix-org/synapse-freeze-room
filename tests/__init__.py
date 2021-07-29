@@ -2,10 +2,10 @@ from unittest import mock
 
 from synapse.module_api import ModuleApi, UserID
 
-from freeze_room import RoomFreeze
+from freeze_room import FreezeRoom
 
 
-def create_module(config_override={}, server_name="example.com") -> RoomFreeze:
+def create_module(config_override={}, server_name="example.com") -> FreezeRoom:
     def get_qualified_user_id(localpart: str) -> str:
         return UserID(localpart, server_name).to_string()
 
@@ -18,4 +18,4 @@ def create_module(config_override={}, server_name="example.com") -> RoomFreeze:
     config = config_override
     config.setdefault("unfreeze_blacklist", [])
 
-    return RoomFreeze(config, module_api)
+    return FreezeRoom(config, module_api)

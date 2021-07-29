@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 FROZEN_STATE_TYPE = "org.matrix.room.frozen"
 
 
-class RoomFreeze:
+class FreezeRoom:
     def __init__(self, config: dict, api: ModuleApi):
         self._api = api
         self._unfreeze_blacklist: List[str] = config.get("unfreeze_blacklist", [])

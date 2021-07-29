@@ -7,7 +7,7 @@ import aiounittest
 from synapse.api.room_versions import RoomVersions
 from synapse.events import FrozenEventV3
 
-from freeze_room import FROZEN_STATE_TYPE, EventTypes, Membership, RoomFreeze
+from freeze_room import FROZEN_STATE_TYPE, EventTypes, Membership, FreezeRoom
 from tests import create_module
 
 
@@ -242,7 +242,7 @@ class RoomFreezeTest(aiounittest.AsyncTestCase):
         self.assertEqual(args[0], expected_dict)
 
     async def _send_frozen_event_and_get_pl_update(
-        self, module: RoomFreeze, frozen: bool,
+        self, module: FreezeRoom, frozen: bool,
     ) -> dict:
         """Sends a frozen state change and get the dict for the power level update it
         triggered.
