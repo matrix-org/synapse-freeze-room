@@ -1,3 +1,5 @@
+import inspect
+from typing import Union, Awaitable, TypeVar
 from unittest import mock
 
 from synapse.module_api import ModuleApi, UserID
@@ -17,7 +19,8 @@ def create_module(config_override={}, server_name="example.com") -> FreezeRoom:
     # Create a mock based on the ModuleApi spec, but override some mocked functions
     # because some capabilities (interacting with the database, getting the current time,
     # etc.) are needed for running the tests.
-    module_api = AsyncMock(spec=ModuleApi)
+    module_api = mock.Mock(spec=ModuleApi)
+    module_api.create_and_send_event_into_room = AsyncMock()
     module_api.get_qualified_user_id.side_effect = get_qualified_user_id
 
     config = config_override
