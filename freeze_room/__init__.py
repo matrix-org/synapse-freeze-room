@@ -397,12 +397,18 @@ def _get_power_levels_content_from_state(
     return power_level_content
 
 
-def _get_users_with_highest_nondefault_pl(content: dict) -> Set[str]:
+def _get_users_with_highest_nondefault_pl(
+    content: dict,
+    state_events: StateMap[EventBase],
+) -> Set[str]:
     """Looks at the provided power levels event content to figure out what the maximum
-    user-specific non-default power level is and what user(s) have it.
+    user-specific non-default power level is and what user(s) who are still in the room
+    have it.
 
     Args:
         content: The power levels event content.
+        state_events: The current state of the room, from which we can check the room's
+            member list.
 
     Returns:
         A set of users with the highest non-default power level, or an empty set if no
@@ -413,8 +419,22 @@ def _get_users_with_highest_nondefault_pl(content: dict) -> Set[str]:
     if max_pl == content.get("users_default", 0):
         return set()
 
-    return set([user_id for user_id, pl in content["users"].items() if pl == max_pl])
+    return set(
+        [
+            user_id
+            for user_id, pl in content["users"].items()
+            if pl == max_pl
+            and (
+                _get_current_membership(user_id, state_events)
+                not in [Membership.JOIN, Membership.INVITE]
+            )
+        ]
+    )
 
+
+def _get_current_membership(user_id: str, state_events: StateMap[EventBase]) -> Membership:
+    evt: EventBase = state_events.get((EventTypes.Member, user_id))
+    return evt.membership
 
 def unfreeze(o):
     if isinstance(o, (dict, frozendict)):
