@@ -14,12 +14,13 @@
 # limitations under the License.
 
 import logging
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Set
 
+import attr
+from frozendict import frozendict
 from synapse.events import EventBase
 from synapse.module_api import ModuleApi, UserID
 from synapse.types import StateMap
-from synapse.util.frozenutils import unfreeze
 
 from freeze_room._constants import EventTypes, Membership
 
@@ -28,13 +29,26 @@ logger = logging.getLogger(__name__)
 FROZEN_STATE_TYPE = "org.matrix.room.frozen"
 
 
+@attr.s(auto_attribs=True, frozen=True)
+class FreezeRoomConfig:
+    unfreeze_blacklist: List[str] = []
+    promote_moderators: bool = False
+
+
 class FreezeRoom:
-    def __init__(self, config: dict, api: ModuleApi):
+    def __init__(self, config: FreezeRoomConfig, api: ModuleApi):
         self._api = api
-        self._unfreeze_blacklist: List[str] = config.get("unfreeze_blacklist", [])
+        self._config = config
 
         self._api.register_third_party_rules_callbacks(
             check_event_allowed=self.check_event_allowed,
+        )
+
+    @staticmethod
+    def parse_config(config: dict) -> FreezeRoomConfig:
+        return FreezeRoomConfig(
+            config.get("unfreeze_blacklist"),
+            config.get("promote_moderators"),
         )
 
     async def check_event_allowed(
@@ -73,7 +87,7 @@ class FreezeRoom:
             and event.membership == Membership.LEAVE
             and event.is_state()
         ):
-            has_frozen_room = await self._freeze_room_if_last_admin_is_leaving(
+            has_frozen_room = await self._on_room_leave(
                 event, state_events,
             )
             replacement = None
@@ -96,7 +110,7 @@ class FreezeRoom:
         # the state change.
         if (
             frozen is False
-            and UserID.from_string(event.sender).domain in self._unfreeze_blacklist
+            and UserID.from_string(event.sender).domain in self._config.unfreeze_blacklist
         ):
             return False, None
 
@@ -224,69 +238,61 @@ class FreezeRoom:
 
         return False, None
 
-    async def _freeze_room_if_last_admin_is_leaving(
-        self, event: EventBase, state_events: StateMap[EventBase]
+    async def _on_room_leave(
+        self, event: EventBase, state_events: StateMap[EventBase],
     ) -> bool:
-        """Checks if the given leave event is for the last admin in the room, and if so
-        freezes the room by sending an org.matrix.room.frozen event.
+        """React to a m.room.member event with a "leave" membership.
+
+        Checks if the user leaving the room is the last admin in the room. If so, checks
+        if there are users with lower but non-default power levels that can be promoted
+        to admins. If so, promotes them to admin if the configuration allows it,
+        otherwise freezes the room.
 
         Args:
-            event: The leave event to process
-            state_events: The current state of the room
+            event: The event to check.
+            state_events: The current state of the room.
 
         Returns:
-            Whether the room was frozen.
+            A boolean indicating whether the room was frozen as a result of the user
+            leaving the room.
         """
-        power_level_state_event = state_events.get(
-            (EventTypes.PowerLevels, "")
-        )  # type: EventBase
-        if not power_level_state_event:
-            return False
-        power_level_content = power_level_state_event.content
-
-        # Do some validation checks on the power level state event
-        if (
-            not isinstance(power_level_content, dict)
-            or "users" not in power_level_content
-            or not isinstance(power_level_content["users"], dict)
-        ):
-            # We can't use this power level event to determine whether the room should be
-            # frozen. Bail out.
+        # Check if the last admin is leaving the room.
+        pl_content = _get_power_levels_content_from_state(state_events).copy()
+        last_admin_leaving = _is_last_admin_leaving(event, pl_content, state_events)
+        if not last_admin_leaving:
             return False
 
-        user_id = event.get("sender")
-        if not user_id:
-            return False
+        # If so, search for users to promote if the configuration allows it.
+        if self._config.promote_moderators:
+            users_to_promote = _get_users_with_highest_nondefault_pl(pl_content)
 
-        # Get every admin user defined in the room's state
-        admin_users = {
-            user
-            for user, power_level in power_level_content["users"].items()
-            if power_level >= 100
-        }
+            if users_to_promote:
+                users_dict = pl_content["users"].copy()
+                for user in users_to_promote:
+                    users_dict[user] = 100
 
-        if user_id not in admin_users:
-            # This user is not an admin, ignore them
-            return False
+                pl_content["users"] = users_dict
 
-        if any(
-            event_type == EventTypes.Member
-            and event.membership in [Membership.JOIN, Membership.INVITE]
-            and state_key in admin_users
-            and state_key != user_id
-            for (event_type, state_key), event in state_events.items()
-        ):
-            # There's another admin user in, or invited to, the room
-            return False
+                await self._api.create_and_send_event_into_room(
+                    {
+                        "room_id": event.room_id,
+                        "sender": event.sender,
+                        "type": EventTypes.PowerLevels,
+                        "content": pl_content,
+                        "state_key": "",
+                    }
+                )
 
-        # Freeze the room by raising the required power level to send events to 100
+                return False
+
+        # If not, freeze the room by marking it as frozen. We don't need to update the
+        # power levels now as they'll get updated by on_frozen_state_change when this
+        # event gets processed.
         logger.info("Freezing room '%s'", event.room_id)
-
-        # Mark the room as frozen
         await self._api.create_and_send_event_into_room(
             {
                 "room_id": event.room_id,
-                "sender": user_id,
+                "sender": event.sender,
                 "type": FROZEN_STATE_TYPE,
                 "content": {"frozen": True},
                 "state_key": "",
@@ -313,3 +319,114 @@ class FreezeRoom:
         # If the user ID we get based on the localpart is the same as the original user
         # ID, then they were a local user
         return user_id == local_user_id
+
+
+def _is_last_admin_leaving(
+    event: EventBase,
+    power_level_content: dict,
+    state_events: StateMap[EventBase],
+) -> bool:
+    """Checks if the provided leave event is the last admin in the room leaving it.
+
+    Args:
+        event: The leave event to check.
+        power_level_content: The content of the power levels event that's currently in
+            the room's state.
+        state_events: The current state of the room, from which we can check the room's
+            member list.
+
+    Returns:
+        Whether this event is the last admin leaving the room.
+    """
+    # Get every admin user defined in the room's state
+    admin_users = {
+        user
+        for user, power_level in power_level_content["users"].items()
+        if power_level >= 100
+    }
+
+    if event.sender not in admin_users:
+        # This user is not an admin, ignore them
+        return False
+
+    if any(
+        event_type == EventTypes.Member
+        and event.membership in [Membership.JOIN, Membership.INVITE]
+        and state_key in admin_users
+        and state_key != event.sender
+        for (event_type, state_key), event in state_events.items()
+    ):
+        # There's another admin user in, or invited to, the room
+        return False
+
+    return True
+
+
+def _get_power_levels_content_from_state(
+    state_events: StateMap[EventBase],
+) -> Optional[dict]:
+    """Extracts the content of the power levels content from the provided set of state
+    events. If the event has no "users" key, or there is no power levels event in the
+    state of the room, None is returned instead.
+
+    Args:
+        state_events: The state events to extract power levels from.
+
+    Returns:
+        A dict representing the content of the power levels event, or None if no power
+        levels event exist in the given state events or if one exists but its content is
+        missing a "users" key.
+    """
+    power_level_state_event = state_events.get(
+        (EventTypes.PowerLevels, "")
+    )  # type: EventBase
+    if not power_level_state_event:
+        return None
+    power_level_content = power_level_state_event.content
+
+    # Do some validation checks on the power level state event
+    if (
+        not isinstance(power_level_content, dict)
+        or "users" not in power_level_content
+        or not isinstance(power_level_content["users"], dict)
+    ):
+        # We can't use this power level event to determine whether the room should be
+        # frozen. Bail out.
+        return None
+
+    return power_level_content
+
+
+def _get_users_with_highest_nondefault_pl(content: dict) -> Set[str]:
+    """Looks at the provided power levels event content to figure out what the maximum
+    user-specific non-default power level is and what user(s) have it.
+
+    Args:
+        content: The power levels event content.
+
+    Returns:
+        A set of users with the highest non-default power level, or an empty set if no
+        such users exist in the room.
+    """
+    max_pl = max(content["users"].values())
+
+    if max_pl == content.get("users_default", 0):
+        return set()
+
+    return set([user_id for user_id, pl in content["users"].items() if pl == max_pl])
+
+
+def unfreeze(o):
+    if isinstance(o, (dict, frozendict)):
+        return {k: unfreeze(v) for k, v in o.items()}
+
+    if isinstance(o, (bytes, str)):
+        return o
+
+    try:
+        return [unfreeze(i) for i in o]
+    except TypeError:
+        pass
+
+    return o
+
