@@ -47,8 +47,8 @@ class FreezeRoom:
     @staticmethod
     def parse_config(config: dict) -> FreezeRoomConfig:
         return FreezeRoomConfig(
-            config.get("unfreeze_blacklist"),
-            config.get("promote_moderators"),
+            config.get("unfreeze_blacklist") or [],
+            config.get("promote_moderators") or False,
         )
 
     async def check_event_allowed(
@@ -87,11 +87,11 @@ class FreezeRoom:
             and event.membership == Membership.LEAVE
             and event.is_state()
         ):
-            has_frozen_room = await self._on_room_leave(
+            need_replace = await self._on_room_leave(
                 event, state_events,
             )
             replacement = None
-            if has_frozen_room:
+            if need_replace:
                 replacement = event.get_dict()
 
             return True, replacement
@@ -253,8 +253,8 @@ class FreezeRoom:
             state_events: The current state of the room.
 
         Returns:
-            A boolean indicating whether the room was frozen as a result of the user
-            leaving the room.
+            A boolean indicating whether an event was sent as a result of processing this
+            one.
         """
         # Check if the last admin is leaving the room.
         pl_content = _get_power_levels_content_from_state(state_events).copy()
@@ -265,8 +265,10 @@ class FreezeRoom:
         # If so, search for users to promote if the configuration allows it.
         if self._config.promote_moderators:
             # Look for users to promote.
+            users_dict = pl_content["users"].copy()
+            del users_dict[event.state_key]
             users_to_promote = _get_users_with_highest_nondefault_pl(
-                pl_content["users"].copy(),
+                users_dict,
                 pl_content.get("users_default", 0),
                 state_events,
             )
@@ -274,11 +276,13 @@ class FreezeRoom:
             # If we found users to promote, update the power levels event in the room's
             # state.
             if users_to_promote:
-                users_dict = pl_content["users"].copy()
+                # We can't just reuse users_dict because _get_users_with_highest_nondefault_pl
+                # has messed with it.
+                updated_users_dict = pl_content["users"].copy()
                 for user in users_to_promote:
-                    users_dict[user] = 100
+                    updated_users_dict[user] = 100
 
-                pl_content["users"] = users_dict
+                pl_content["users"] = updated_users_dict
 
                 await self._api.create_and_send_event_into_room(
                     {
@@ -290,7 +294,7 @@ class FreezeRoom:
                     }
                 )
 
-                return False
+                return True
 
         # If not, freeze the room by marking it as frozen. We don't need to update the
         # power levels now as they'll get updated by on_frozen_state_change when this
@@ -426,6 +430,9 @@ def _get_users_with_highest_nondefault_pl(
         A set of users with the highest non-default power level, or an empty set if no
         such users exist in the room.
     """
+    if not users_dict:
+        return set()
+
     # Get the max power level in the dict.
     max_pl = max(users_dict.values())
 
@@ -441,8 +448,8 @@ def _get_users_with_highest_nondefault_pl(
             for user_id, pl in users_dict.items()
             if pl == max_pl
             and (
-                state_events.get((EventTypes.Member, user_id)).membership
-                not in [Membership.JOIN, Membership.INVITE]
+                _get_membership(user_id, state_events)
+                in [Membership.JOIN, Membership.INVITE]
             )
         ]
     )
@@ -451,17 +458,30 @@ def _get_users_with_highest_nondefault_pl(
         # If we don't have any user to promote (which means every user with the max power
         # level has left the room), remove any user with the max power level so we can
         # try again with the next highest power level.
-        for user_id, pl in users_dict.values():
+        new_users_dict = users_dict.copy()
+        for user_id, pl in users_dict.items():
             if pl == max_pl:
-                del users_dict[user_id]
+                del new_users_dict[user_id]
 
         return _get_users_with_highest_nondefault_pl(
-            users_dict,
+            new_users_dict,
             users_default_pl,
             state_events,
         )
 
     return users_to_promote
+
+
+def _get_membership(
+    user_id: str,
+    state_events: StateMap[EventBase],
+) -> Optional[Membership]:
+    evt: Optional[EventBase] = state_events.get((EventTypes.Member, user_id))
+
+    if evt is None:
+        return None
+
+    return evt.membership
 
 
 def unfreeze(o):

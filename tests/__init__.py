@@ -36,7 +36,6 @@ def create_module(config_override={}, server_name="example.com") -> FreezeRoom:
     module_api.create_and_send_event_into_room = AsyncMock()
     module_api.get_qualified_user_id.side_effect = get_qualified_user_id
 
-    config = config_override
-    config.setdefault("unfreeze_blacklist", [])
+    config = FreezeRoom.parse_config(config_override)
 
     return FreezeRoom(config, module_api)
