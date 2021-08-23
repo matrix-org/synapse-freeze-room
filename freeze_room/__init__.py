@@ -264,8 +264,15 @@ class FreezeRoom:
 
         # If so, search for users to promote if the configuration allows it.
         if self._config.promote_moderators:
-            users_to_promote = _get_users_with_highest_nondefault_pl(pl_content)
+            # Look for users to promote.
+            users_to_promote = _get_users_with_highest_nondefault_pl(
+                pl_content["users"].copy(),
+                pl_content.get("users_default", 0),
+                state_events,
+            )
 
+            # If we found users to promote, update the power levels event in the room's
+            # state.
             if users_to_promote:
                 users_dict = pl_content["users"].copy()
                 for user in users_to_promote:
@@ -398,15 +405,20 @@ def _get_power_levels_content_from_state(
 
 
 def _get_users_with_highest_nondefault_pl(
-    content: dict,
+    users_dict: dict,
+    users_default_pl: int,
     state_events: StateMap[EventBase],
 ) -> Set[str]:
-    """Looks at the provided power levels event content to figure out what the maximum
-    user-specific non-default power level is and what user(s) who are still in the room
-    have it.
+    """Looks at the provided bits of power levels event content to figure out what the
+    maximum user-specific non-default power level is with users still in the room (or
+    invited to it) and which users have it.
 
     Args:
-        content: The power levels event content.
+        users_dict: The "users" dictionary from the power levels event content. This
+            function modifies it so it expects to be given a copy of the original dict
+            rather than the dict directly.
+        users_default_pl: The default power level for users who don't appear in the users
+            dictionary.
         state_events: The current state of the room, from which we can check the room's
             member list.
 
@@ -414,27 +426,43 @@ def _get_users_with_highest_nondefault_pl(
         A set of users with the highest non-default power level, or an empty set if no
         such users exist in the room.
     """
-    max_pl = max(content["users"].values())
+    # Get the max power level in the dict.
+    max_pl = max(users_dict.values())
 
-    if max_pl == content.get("users_default", 0):
+    # Bail out if the max power level is the default one.
+    if max_pl == users_default_pl:
         return set()
 
-    return set(
+    # Figure out which users will need promoting: every user with the max power level
+    # that's still in the room (or have a pending invite to it).
+    users_to_promote = set(
         [
             user_id
-            for user_id, pl in content["users"].items()
+            for user_id, pl in users_dict.items()
             if pl == max_pl
             and (
-                _get_current_membership(user_id, state_events)
+                state_events.get((EventTypes.Member, user_id)).membership
                 not in [Membership.JOIN, Membership.INVITE]
             )
         ]
     )
 
+    if not users_to_promote:
+        # If we don't have any user to promote (which means every user with the max power
+        # level has left the room), remove any user with the max power level so we can
+        # try again with the next highest power level.
+        for user_id, pl in users_dict.values():
+            if pl == max_pl:
+                del users_dict[user_id]
 
-def _get_current_membership(user_id: str, state_events: StateMap[EventBase]) -> Membership:
-    evt: EventBase = state_events.get((EventTypes.Member, user_id))
-    return evt.membership
+        return _get_users_with_highest_nondefault_pl(
+            users_dict,
+            users_default_pl,
+            state_events,
+        )
+
+    return users_to_promote
+
 
 def unfreeze(o):
     if isinstance(o, (dict, frozendict)):
