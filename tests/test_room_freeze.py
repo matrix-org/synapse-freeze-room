@@ -296,7 +296,7 @@ class RoomFreezeTest(aiounittest.AsyncTestCase):
 
         allowed, replacement = await module.check_event_allowed(leave_event, self.state)
         self.assertTrue(allowed)
-        self.assertEqual(replacement, leave_event.get_dict())
+        self.assertEqual(replacement, None)
 
         # Test that the leave triggered a freeze of the room.
         self.assertTrue(module._api.create_and_send_event_into_room.called)
