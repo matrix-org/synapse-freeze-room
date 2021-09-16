@@ -464,7 +464,7 @@ def _get_users_with_highest_nondefault_pl(
 
         # Figure out which users will need promoting: every user with the max power level
         # that's still in the room (or have a pending invite to it).
-        users_to_promote = (
+        users_to_promote = tuple(
             user_id
             for user_id, pl in users_dict_copy.items()
             if pl == max_pl
@@ -479,9 +479,15 @@ def _get_users_with_highest_nondefault_pl(
             return users_to_promote
 
         # Otherwise, remove the users we've considered and start again.
+        # We do it in two loops because we can't delete from users_dict_copy while
+        # iterating over it.
+        users_to_delete = []
         for user_id, pl in users_dict_copy.items():
             if pl == max_pl:
-                del users_dict_copy[user_id]
+                users_to_delete.append(user_id)
+
+        for user_id in users_to_delete:
+            del users_dict_copy[user_id]
 
 
 def _get_membership(
