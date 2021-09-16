@@ -331,7 +331,7 @@ class RoomFreezeTest(aiounittest.AsyncTestCase):
         # Check that we get the right result back from the callback.
         allowed, replacement = await module.check_event_allowed(leave_event, self.state)
         self.assertTrue(allowed)
-        self.assertEqual(replacement, leave_event.get_dict())
+        self.assertEqual(replacement, None)
 
         # Test that a new event was sent into the room.
         self.assertTrue(module._api.create_and_send_event_into_room.called)
@@ -372,7 +372,7 @@ class RoomFreezeTest(aiounittest.AsyncTestCase):
             new_leave_event, self.state,
         )
         self.assertTrue(allowed)
-        self.assertEqual(replacement, new_leave_event.get_dict())
+        self.assertEqual(replacement, None)
 
         # Test that a new event was sent into the room.
         self.assertTrue(module._api.create_and_send_event_into_room.called)
