@@ -12,9 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import copy
 import logging
-from typing import List, Tuple, Optional, Set
+from typing import List, Tuple, Optional, Set, Iterable
 
 import attr
 from frozendict import frozendict
@@ -47,8 +47,8 @@ class FreezeRoom:
     @staticmethod
     def parse_config(config: dict) -> FreezeRoomConfig:
         return FreezeRoomConfig(
-            config.get("unfreeze_blacklist") or [],
-            config.get("promote_moderators") or False,
+            config.get("unfreeze_blacklist", []),
+            config.get("promote_moderators", []),
         )
 
     async def check_event_allowed(
@@ -67,9 +67,10 @@ class FreezeRoom:
                 State events in the room the event originated from.
 
         Returns:
-            True if the event should be allowed, False if it should be rejected, or a
-            dictionary if the event needs to be rebuilt (containing the event's new
-            content).
+            True if the event should be allowed, False if it should be rejected. If the
+            event should be allowed but with some of its data replaced (or its context
+            needs to be recalculated, eg because the state of the room has changed), an
+            dictionary might be returned in addition to the boolean.
         """
         if event.type == FROZEN_STATE_TYPE and event.is_state():
             return await self._on_frozen_state_change(event, state_events)
@@ -87,14 +88,9 @@ class FreezeRoom:
             and event.membership == Membership.LEAVE
             and event.is_state()
         ):
-            need_replace = await self._on_room_leave(
-                event, state_events,
-            )
-            replacement = None
-            if need_replace:
-                replacement = event.get_dict()
+            await self._on_room_leave(event, state_events)
 
-            return True, replacement
+        return True, None
 
     async def _on_frozen_state_change(
         self,
@@ -240,7 +236,7 @@ class FreezeRoom:
 
     async def _on_room_leave(
         self, event: EventBase, state_events: StateMap[EventBase],
-    ) -> bool:
+    ) -> None:
         """React to a m.room.member event with a "leave" membership.
 
         Checks if the user leaving the room is the last admin in the room. If so, checks
@@ -251,55 +247,41 @@ class FreezeRoom:
         Args:
             event: The event to check.
             state_events: The current state of the room.
-
-        Returns:
-            A boolean indicating whether an event was sent as a result of processing this
-            one.
         """
         # Check if the last admin is leaving the room.
-        pl_content = _get_power_levels_content_from_state(state_events).copy()
+        pl_content = _get_power_levels_content_from_state(state_events)
+        if pl_content is None:
+            return
+
         last_admin_leaving = _is_last_admin_leaving(event, pl_content, state_events)
         if not last_admin_leaving:
-            return False
+            return
 
         # If so, search for users to promote if the configuration allows it.
         if self._config.promote_moderators:
             # Look for users to promote.
-            users_dict = pl_content["users"].copy()
-            del users_dict[event.state_key]
             users_to_promote = _get_users_with_highest_nondefault_pl(
-                users_dict,
+                pl_content["users"],
                 pl_content.get("users_default", 0),
                 state_events,
+                ignore_user=event.state_key,
             )
 
             # If we found users to promote, update the power levels event in the room's
             # state.
             if users_to_promote:
-                # We can't just reuse users_dict because _get_users_with_highest_nondefault_pl
-                # has messed with it.
-                updated_users_dict = pl_content["users"].copy()
-                for user in users_to_promote:
-                    updated_users_dict[user] = 100
-
-                pl_content["users"] = updated_users_dict
-
-                await self._api.create_and_send_event_into_room(
-                    {
-                        "room_id": event.room_id,
-                        "sender": event.sender,
-                        "type": EventTypes.PowerLevels,
-                        "content": pl_content,
-                        "state_key": "",
-                    }
+                logger.info(
+                    "Promoting users to admins in room %s: %s",
+                    event.room_id,
+                    users_to_promote,
                 )
-
-                return True
+                await self._promote_to_admins(users_to_promote, pl_content, event)
+                return
 
         # If not, freeze the room by marking it as frozen. We don't need to update the
         # power levels now as they'll get updated by on_frozen_state_change when this
         # event gets processed.
-        logger.info("Freezing room '%s'", event.room_id)
+        logger.info("Freezing room %s", event.room_id)
         await self._api.create_and_send_event_into_room(
             {
                 "room_id": event.room_id,
@@ -310,7 +292,38 @@ class FreezeRoom:
             }
         )
 
-        return True
+        return
+
+    async def _promote_to_admins(
+        self,
+        users_to_promote: Iterable[str],
+        pl_content: dict,
+        event: EventBase,
+    ) -> None:
+        """Promotes a given list of users to admins.
+
+        Args:
+            users_to_promote: The users to promote.
+            pl_content: The content of the m.room.power_levels event that's currently in
+                the room state.
+            event: The event we want to use the sender and room_id of to send the new
+                power levels event.
+        """
+        # Make a deep copy of the content so we don't edit the "users" dict from
+        # the event that's currently in the room's state.
+        new_pl_content = copy.deepcopy(pl_content)
+        for user in users_to_promote:
+            new_pl_content["users"][user] = 100
+
+        await self._api.create_and_send_event_into_room(
+            {
+                "room_id": event.room_id,
+                "sender": event.sender,
+                "type": EventTypes.PowerLevels,
+                "content": new_pl_content,
+                "state_key": "",
+            }
+        )
 
     def _is_local_user(self, user_id: str) -> bool:
         """Checks whether a given user ID belongs to this homeserver, or a remote
@@ -412,64 +425,63 @@ def _get_users_with_highest_nondefault_pl(
     users_dict: dict,
     users_default_pl: int,
     state_events: StateMap[EventBase],
-) -> Set[str]:
+    ignore_user: str,
+) -> Tuple[str]:
     """Looks at the provided bits of power levels event content to figure out what the
     maximum user-specific non-default power level is with users still in the room (or
     invited to it) and which users have it.
 
     Args:
-        users_dict: The "users" dictionary from the power levels event content. This
-            function modifies it so it expects to be given a copy of the original dict
-            rather than the dict directly.
+        users_dict: The "users" dictionary from the power levels event content.
         users_default_pl: The default power level for users who don't appear in the users
             dictionary.
         state_events: The current state of the room, from which we can check the room's
             member list.
+        ignore_user: A user to ignore, i.e. to consider they've left the room even if the
+            room's state says otherwise.
 
     Returns:
-        A set of users with the highest non-default power level, or an empty set if no
+        A tuple of users with the highest non-default power level, or an empty set if no
         such users exist in the room.
     """
-    if not users_dict:
-        return set()
+    # Make a copy of the users dict so we don't modify the actual event content.
+    users_dict_copy = users_dict.copy()
 
-    # Get the max power level in the dict.
-    max_pl = max(users_dict.values())
+    if ignore_user in users_dict_copy:
+        del users_dict_copy[ignore_user]
 
-    # Bail out if the max power level is the default one.
-    if max_pl == users_default_pl:
-        return set()
+    while True:
+        # If there's no more user to evaluate, return an empty tuple.
+        if not users_dict_copy:
+            return tuple()
 
-    # Figure out which users will need promoting: every user with the max power level
-    # that's still in the room (or have a pending invite to it).
-    users_to_promote = set(
-        [
+        # Get the max power level in the dict.
+        max_pl = max(users_dict_copy.values())
+
+        # Bail out if the max power level is the default one (or is lower).
+        if max_pl <= users_default_pl:
+            return tuple()
+
+        # Figure out which users will need promoting: every user with the max power level
+        # that's still in the room (or have a pending invite to it).
+        users_to_promote = (
             user_id
-            for user_id, pl in users_dict.items()
+            for user_id, pl in users_dict_copy.items()
             if pl == max_pl
             and (
                 _get_membership(user_id, state_events)
                 in [Membership.JOIN, Membership.INVITE]
             )
-        ]
-    )
-
-    if not users_to_promote:
-        # If we don't have any user to promote (which means every user with the max power
-        # level has left the room), remove any user with the max power level so we can
-        # try again with the next highest power level.
-        new_users_dict = users_dict.copy()
-        for user_id, pl in users_dict.items():
-            if pl == max_pl:
-                del new_users_dict[user_id]
-
-        return _get_users_with_highest_nondefault_pl(
-            new_users_dict,
-            users_default_pl,
-            state_events,
         )
 
-    return users_to_promote
+        # If we've got users in the room to promote, break out and return.
+        if users_to_promote:
+            return users_to_promote
+
+        # Otherwise, remove the users we've considered and start again.
+        for user_id, pl in users_dict_copy.items():
+            if pl == max_pl:
+                del users_dict_copy[user_id]
 
 
 def _get_membership(
