@@ -313,7 +313,7 @@ class FreezeRoom:
         # the event that's currently in the room's state.
         new_pl_content = copy.deepcopy(pl_content)
         for user in users_to_promote:
-            new_pl_content["users"][user] = 100
+            new_pl_content["users"][user] = pl_content["users"][event.sender]
 
         await self._api.create_and_send_event_into_room(
             {
@@ -462,13 +462,19 @@ def _get_users_with_highest_nondefault_pl(
         if max_pl <= users_default_pl:
             return ()
 
-        # Figure out which users will need promoting: every user with the max power level
-        # that's still in the room (or have a pending invite to it).
-        users_to_promote = tuple(
+        # Figure out which users have that maximum power level.
+        users_with_max_pl = tuple(
             user_id
             for user_id, pl in users_dict_copy.items()
             if pl == max_pl
-            and (
+        )
+
+        # Among those users, figure out which ones are still in the room (or have a
+        # pending invite to it): those are the users we need to promote.
+        users_to_promote = tuple(
+            user_id
+            for user_id, pl in users_with_max_pl
+            if (
                 _get_membership(user_id, state_events)
                 in [Membership.JOIN, Membership.INVITE]
             )
@@ -479,15 +485,7 @@ def _get_users_with_highest_nondefault_pl(
             return users_to_promote
 
         # Otherwise, remove the users we've considered and start again.
-        # We do it in two loops because we can't delete from users_dict_copy while
-        # iterating over it.
-        users_to_delete = tuple(
-            user_id 
-            for user_id, pl in users_dict_copy.items() 
-            if pl == max_pl
-        )
-
-        for user_id in users_to_delete:
+        for user_id in users_with_max_pl:
             del users_dict_copy[user_id]
 
 
