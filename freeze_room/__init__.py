@@ -48,7 +48,7 @@ class FreezeRoom:
     def parse_config(config: dict) -> FreezeRoomConfig:
         return FreezeRoomConfig(
             config.get("unfreeze_blacklist", []),
-            config.get("promote_moderators", []),
+            config.get("promote_moderators", False),
         )
 
     async def check_event_allowed(
@@ -69,7 +69,7 @@ class FreezeRoom:
         Returns:
             True if the event should be allowed, False if it should be rejected. If the
             event should be allowed but with some of its data replaced (or its context
-            needs to be recalculated, eg because the state of the room has changed), an
+            needs to be recalculated, eg because the state of the room has changed), a
             dictionary might be returned in addition to the boolean.
         """
         if event.type == FROZEN_STATE_TYPE and event.is_state():
@@ -453,14 +453,14 @@ def _get_users_with_highest_nondefault_pl(
     while True:
         # If there's no more user to evaluate, return an empty tuple.
         if not users_dict_copy:
-            return tuple()
+            return ()
 
         # Get the max power level in the dict.
         max_pl = max(users_dict_copy.values())
 
         # Bail out if the max power level is the default one (or is lower).
         if max_pl <= users_default_pl:
-            return tuple()
+            return ()
 
         # Figure out which users will need promoting: every user with the max power level
         # that's still in the room (or have a pending invite to it).
@@ -481,10 +481,11 @@ def _get_users_with_highest_nondefault_pl(
         # Otherwise, remove the users we've considered and start again.
         # We do it in two loops because we can't delete from users_dict_copy while
         # iterating over it.
-        users_to_delete = []
-        for user_id, pl in users_dict_copy.items():
-            if pl == max_pl:
-                users_to_delete.append(user_id)
+        users_to_delete = tuple(
+            user_id 
+            for user_id, pl in users_dict_copy.items() 
+            if pl == max_pl
+        )
 
         for user_id in users_to_delete:
             del users_dict_copy[user_id]
