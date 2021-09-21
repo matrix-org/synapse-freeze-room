@@ -46,6 +46,7 @@ setup(
     description="A third-party rules module for Synapse to automatically freeze a room when the last admin leaves it and allow other members to unfreeze them and become the new admin.",
     use_scm_version=True,
     setup_requires=["setuptools_scm"],
+    install_requires=["attrs"],
     long_description=read_file(("README.md",)),
     long_description_content_type="text/markdown",
     url="https://github.com/matrix-org/synapse-freeze-room",
