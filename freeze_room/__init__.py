@@ -473,7 +473,7 @@ def _get_users_with_highest_nondefault_pl(
         # pending invite to it): those are the users we need to promote.
         users_to_promote = tuple(
             user_id
-            for user_id, pl in users_with_max_pl
+            for user_id in users_with_max_pl
             if (
                 _get_membership(user_id, state_events)
                 in [Membership.JOIN, Membership.INVITE]
